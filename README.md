@@ -6,7 +6,7 @@
 ## Overview
 
 Reverse-engineered the HOSxP database schema using SQL `DESCRIBE` / `information_schema` queries,
-analyzing 15+ OPD tables and 1M+ patient records without a data dictionary,
+analyzing 2,528+ tables and 1M+ patient records without a data dictionary,
 saving THB 300,000 in training costs.
 
 ## Features
