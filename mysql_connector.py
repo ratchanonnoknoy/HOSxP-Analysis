@@ -1,249 +1,242 @@
-from flask import Flask, render_template_string, abort
-from sqlalchemy import create_engine, inspect
+import argparse
+
+import pandas as pd
+from rich import box
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 
-app = Flask(__name__)
+# ============================================================
+# 1) ตั้งค่า (แก้ตรงนี้ได้เลย)
+# ============================================================
+DB_NAME = "hos"
+DEFAULT_TABLE = "patient"
 
-# Database Connection
-connection_url = URL.create(
-    drivername="mysql+pymysql",
-    username="root",
-    password="",
-    host="127.0.0.1",
-    port=3306,
-    database="hos",
-)
+# ฟิลด์ที่ใช้ join ตารางบ่อยๆ ใน HOSxP จะถูกไฮไลต์สีม่วง
+JOIN_KEYS = {"hn", "vn", "an", "cid", "icode", "pttype", "hcode",
+             "doctor", "depcode", "ward", "spclty", "regdate", "vstdate"}
+
+# ป้ายและสีของคอลัมน์ Key
+KEY_LABELS = {
+    "PRI": ("🔑 PK", "bold yellow"),   # Primary Key
+    "UNI": ("◆ UNI", "bold magenta"),  # Unique
+    "MUL": ("◇ IDX", "cyan"),          # Index ธรรมดา
+}
 
 engine = create_engine(
-    connection_url,
-    pool_pre_ping=True
+    URL.create(
+        "mysql+pymysql",
+        username="root",
+        password="",
+        host="127.0.0.1",
+        port=3306,
+        database=DB_NAME,
+    )
 )
+console = Console()
 
-# HTML Template
-HTML = """
-<!DOCTYPE html>
-<html lang="th">
-<head>
-<meta charset="UTF-8">
-<title>HOSxP Database Explorer</title>
-<style>
-* { box-sizing: border-box; }
-body {
-    margin: 0;
-    font-family: Arial, sans-serif;
-    background: #f1f5f9;
-    color: #334155;
-}
-.header {
-    background: #1e293b;
-    color: white;
-    padding: 17px 24px;
-    font-size: 20px;
-    font-weight: bold;
-}
-.layout {
-    display: flex;
-    min-height: calc(100vh - 58px);
-}
-.sidebar {
-    width: 260px;
-    background: white;
-    border-right: 1px solid #ddd;
-    padding: 18px;
-    flex-shrink: 0;
-}
-.sidebar h3 { margin-top: 0; }
-.search {
-    width: 100%;
-    padding: 10px;
-    border: 1px solid #cbd5e1;
-    border-radius: 6px;
-    margin-bottom: 15px;
-}
-.table-link {
-    display: block;
-    padding: 9px 10px;
-    color: #334155;
-    text-decoration: none;
-    border-radius: 5px;
-    font-size: 14px;
-}
-.table-link:hover, .active {
-    background: #dbeafe;
-    color: #1d4ed8;
-}
-.main {
-    flex: 1;
-    padding: 28px;
-    min-width: 0;
-}
-.card {
-    background: white;
-    border-radius: 9px;
-    padding: 22px;
-    box-shadow: 0 1px 4px #00000010;
-}
-h2 { margin-top: 0; }
-.info {
-    color: #64748b;
-    margin-bottom: 20px;
-}
-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-}
-th {
-    background: #e2e8f0;
-    text-align: left;
-}
-th, td {
-    padding: 12px;
-    border: 1px solid #e2e8f0;
-}
-tr:hover { background: #f8fafc; }
-.key {
-    color: #2563eb;
-    font-weight: bold;
-}
-.badge {
-    display: inline-block;
-    background: #dcfce7;
-    color: #166534;
-    padding: 5px 9px;
-    border-radius: 20px;
-    font-size: 12px;
-}
-@media(max-width:700px) {
-    .layout { flex-direction: column; }
-    .sidebar { width: 100%; }
-    .main { padding: 12px; overflow-x: auto; }
-}
-</style>
-</head>
 
-<body>
-<div class="header">
-    HOSxP Database Explorer
-</div>
+# ============================================================
+# 2) ฟังก์ชันดึงข้อมูลจากฐานข้อมูล
+# ============================================================
+def run_query(sql, **params):
+    """รัน SQL แล้วคืนผลเป็น DataFrame (ใส่ชื่อฐานข้อมูลให้อัตโนมัติ)"""
+    return pd.read_sql(text(sql), engine, params={"db": DB_NAME, **params})
 
-<div class="layout">
-    <aside class="sidebar">
-        <h3>Database: hos</h3>
-        <input class="search" id="search"
-               placeholder="ค้นหาตาราง...">
 
-        <div id="tableList">
-        {% for name in tables %}
-            <a class="table-link {% if name == selected %}active{% endif %}"
-               href="/table/{{ name }}">
-               ▦ {{ name }}
-            </a>
-        {% endfor %}
-        </div>
-        <p class="info">ทั้งหมด {{ tables|length }} ตาราง</p>
-    </aside>
-
-    <main class="main">
-        <div class="card">
-        {% if selected %}
-            <h2>▦ {{ selected }}</h2>
-            <div class="info">
-                โครงสร้างตาราง
-                <span class="badge">
-                    {{ columns|length }} Columns
-                </span>
-            </div>
-
-            <table>
-                <thead>
-                    <tr>
-                        <th>Field</th>
-                        <th>Type</th>
-                        <th>Null</th>
-                        <th>Key</th>
-                        <th>Default</th>
-                        <th>Extra</th>
-                    </tr>
-                </thead>
-                <tbody>
-                {% for col in columns %}
-                    <tr>
-                        <td><b>{{ col.name }}</b></td>
-                        <td>{{ col.type }}</td>
-                        <td>{{ 'YES' if col.nullable else 'NO' }}</td>
-                        <td class="key">
-                            {{ 'PRI' if col.primary_key else '' }}
-                        </td>
-                        <td>{{ col.default if col.default is not none else 'NULL' }}</td>
-                        <td>{{ col.autoincrement if col.autoincrement else '' }}</td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        {% else %}
-            <h2>ยินดีต้อนรับ</h2>
-            <p>เลือกตารางจากเมนูด้านซ้ายเพื่อดูโครงสร้าง</p>
-            <p class="info">
-                HOSxP Database Explorer - Read Only
-            </p>
-        {% endif %}
-        </div>
-    </main>
-</div>
-
-<script>
-document.getElementById("search").addEventListener("input", function() {
-    let keyword = this.value.toLowerCase();
-    document.querySelectorAll(".table-link").forEach(function(item) {
-        item.style.display =
-            item.textContent.toLowerCase().includes(keyword)
-            ? "block" : "none";
-    });
-});
-</script>
-</body>
-</html>
-"""
-
-@app.route("/")
-def index():
-    inspector = inspect(engine)
-    tables = sorted(inspector.get_table_names())
-
-    return render_template_string(
-        HTML,
-        tables=tables,
-        selected=None,
-        columns=[]
+def get_columns(table_name):
+    """ดึงรายชื่อคอลัมน์ทั้งหมดของตาราง"""
+    return run_query(
+        """
+        SELECT ORDINAL_POSITION AS position,
+               COLUMN_NAME      AS field,
+               COLUMN_TYPE      AS data_type,
+               IS_NULLABLE      AS nullable,
+               COLUMN_KEY       AS key_type,
+               COLUMN_COMMENT   AS comment
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :table_name
+        ORDER BY ORDINAL_POSITION
+        """,
+        table_name=table_name,
     )
 
-@app.route("/table/<table_name>")
-def show_table(table_name):
-    inspector = inspect(engine)
-    tables = sorted(inspector.get_table_names())
 
-    # ป้องกันการเรียกชื่อตารางที่ไม่มีอยู่จริง
-    if table_name not in tables:
-        abort(404)
-
-    columns = inspector.get_columns(table_name)
-    primary_keys = inspector.get_pk_constraint(table_name)
-    pk_columns = primary_keys.get("constrained_columns") or []
-
-    for col in columns:
-        col["primary_key"] = col["name"] in pk_columns
-
-    return render_template_string(
-        HTML,
-        tables=tables,
-        selected=table_name,
-        columns=columns
+def get_row_count_text(table_name):
+    """ดึงจำนวนแถวโดยประมาณ (เร็วกว่า COUNT(*) มาก)"""
+    result = run_query(
+        """
+        SELECT TABLE_ROWS AS total_rows
+        FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :table_name
+        """,
+        table_name=table_name,
     )
+    if result.empty or pd.isna(result["total_rows"][0]):
+        return "ไม่ทราบจำนวนแถว"
+    return f"~{int(result['total_rows'][0]):,} แถว"
+
+
+def get_indexes(table_name):
+    """ดึงรายการ Index ของตาราง"""
+    return run_query(
+        """
+        SELECT INDEX_NAME AS index_name,
+               NON_UNIQUE AS non_unique,
+               GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ', ') AS columns
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :table_name
+        GROUP BY INDEX_NAME, NON_UNIQUE
+        ORDER BY INDEX_NAME = 'PRIMARY' DESC, INDEX_NAME
+        """,
+        table_name=table_name,
+    )
+
+
+def find_similar_tables(keyword):
+    """ค้นหาตารางที่ชื่อมีคำนี้อยู่ (ใช้ตอนพิมพ์ชื่อตารางผิด)"""
+    result = run_query(
+        """
+        SELECT TABLE_NAME AS name
+        FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = :db AND TABLE_NAME LIKE :keyword
+        LIMIT 50
+        """,
+        keyword=f"%{keyword}%",
+    )
+    return result["name"].tolist()
+
+
+def get_sample_values(table_name, rows_to_scan=500):
+    """
+    ดึงค่าตัวอย่างของแต่ละคอลัมน์ โดยหาค่าแรกที่ 'ไม่ว่าง'
+    จาก 500 แถวแรกของตาราง
+    """
+    df = pd.read_sql(text(f"SELECT * FROM `{table_name}` LIMIT {rows_to_scan}"), engine)
+    samples = {}
+
+    for column in df.columns:
+        values = df[column].dropna()                      # ตัดค่า NULL
+        values = values[values.astype(str).str.strip() != ""]  # ตัดค่าว่าง
+        first_value = values.iloc[0] if len(values) > 0 else ""
+
+        if isinstance(first_value, (bytes, bytearray)):
+            samples[column] = "<binary>"
+        else:
+            samples[column] = str(first_value).replace("\n", " ")[:28]
+
+    return samples, len(df)
+
+
+# ============================================================
+# 3) ฟังก์ชันแสดงผลสวยๆ
+# ============================================================
+def pick_field_style(field, key_type):
+    """เลือกสีชื่อฟิลด์: PK = เหลือง, คีย์ join = ม่วง, อื่นๆ = เขียว"""
+    if key_type == "PRI":
+        return "bold yellow"
+    if field.lower() in JOIN_KEYS:
+        return "bold magenta"
+    return "green"
+
+
+def build_table(table_name, columns, samples, sample_count, show_sample):
+    """สร้างตารางสำหรับแสดงโครงสร้าง"""
+    caption = f"{len(columns)} คอลัมน์"
+    if show_sample:
+        caption += f" • sample จาก {sample_count} แถวแรก"
+
+    table = Table(
+        title=f"📋 [bold cyan]{table_name}[/bold cyan] [dim]({get_row_count_text(table_name)})[/dim]",
+        box=box.SIMPLE_HEAD,
+        header_style="bold white on dark_blue",
+        row_styles=["", "on grey15"],  # แถวสลับสี
+        caption=caption,
+    )
+
+    # หัวคอลัมน์
+    table.add_column("#", justify="right", style="dim", no_wrap=True)
+    table.add_column("Field", no_wrap=True)
+    table.add_column("Type", style="cyan", max_width=22, overflow="fold")
+    table.add_column("Key", justify="center", no_wrap=True)
+    table.add_column("Null", justify="center", no_wrap=True)
+    if show_sample:
+        table.add_column("Sample", max_width=30, overflow="fold")
+    table.add_column("Comment", style="italic yellow", overflow="fold")
+
+    # ใส่ข้อมูลทีละแถว
+    for col in columns.itertuples(index=False):
+        key_label, key_style = KEY_LABELS.get(col.key_type, ("", ""))
+        null_text = Text("•", style="dim") if col.nullable == "YES" else Text("NOT NULL", style="bold red")
+
+        row = [
+            str(col.position),
+            Text(col.field, style=pick_field_style(col.field, col.key_type)),
+            Text(col.data_type),
+            Text(key_label, style=key_style),
+            null_text,
+        ]
+
+        if show_sample:
+            sample = samples.get(col.field, "")
+            row.append(Text(sample, style="") if sample else Text("-", style="dim"))
+
+        row.append(Text(col.comment or ""))
+        table.add_row(*row)
+
+    return table
+
+
+def print_indexes(table_name):
+    """แสดงรายการ Index ใต้ตาราง"""
+    for idx in get_indexes(table_name).itertuples(index=False):
+        if idx.index_name == "PRIMARY":
+            tag = "[yellow]PRIMARY[/yellow]"
+        elif idx.non_unique == 0:
+            tag = "[magenta]UNIQUE[/magenta]"
+        else:
+            tag = "[cyan]INDEX[/cyan]"
+        console.print(f"  {tag} [bold]{idx.index_name}[/bold] → ({idx.columns})")
+
+
+# ============================================================
+# 4) ฟังก์ชันหลัก
+# ============================================================
+def describe_table(table_name, show_sample):
+    columns = get_columns(table_name)
+
+    # ถ้าไม่พบตาราง ให้แนะนำชื่อใกล้เคียง
+    if columns.empty:
+        console.print(f"[yellow]ไม่พบตาราง[/yellow] [bold]{table_name}[/bold]")
+        similar = find_similar_tables(table_name)
+        if similar:
+            console.print("[dim]ตารางที่ชื่อคล้ายกัน:[/dim] " + ", ".join(f"[cyan]{n}[/cyan]" for n in similar))
+        return
+
+    samples, sample_count = get_sample_values(table_name) if show_sample else ({}, 0)
+
+    console.print()
+    console.print(build_table(table_name, columns, samples, sample_count, show_sample))
+    print_indexes(table_name)
+    console.print("\n[dim]สี: 🟨 PK  🟪 คีย์ join (hn/vn/an/...)  🟩 ฟิลด์ทั่วไป[/dim]\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="แกะโครงสร้างตาราง HOSxP")
+    parser.add_argument("table", nargs="?", default=DEFAULT_TABLE, help="ชื่อตาราง")
+    parser.add_argument("--no-sample", action="store_true",
+                        help="ไม่แสดงค่าตัวอย่าง (กันข้อมูลผู้ป่วยโชว์บนจอ)")
+    args = parser.parse_args()
+
+    try:
+        describe_table(args.table, show_sample=not args.no_sample)
+    except Exception as error:
+        console.print(f"[red]เกิดข้อผิดพลาด:[/red] {error}")
+    finally:
+        engine.dispose()
+
 
 if __name__ == "__main__":
-    app.run(
-        host="127.0.0.1",
-        port=5000,
-        debug=False
-    )
+    main()
